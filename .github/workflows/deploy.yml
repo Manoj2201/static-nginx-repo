@@ -1,0 +1,63 @@
+name: Build & Deploy to server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/static-html:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/static-html:${{ github.sha }}
+
+      - name: Deploy to server via SSH
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/static-html:latest
+        run: |
+          # write private key to disk
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          SSH_PORT="${{ secrets.SSH_PORT }}"
+          if [ -z "$SSH_PORT" ]; then SSH_PORT=22; fi
+
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/static-html:latest"
+
+          # SSH and run remote commands. Note: we escape $ where we want it evaluated on the remote machine
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key -p $SSH_PORT ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
+            echo "Pulling image: ${IMAGE}"
+            docker pull ${IMAGE}
+
+            if [ "\$(docker ps -aq -f name=static_site)" ]; then
+              echo "Stopping existing container..."
+              docker stop static_site || true
+              docker rm static_site || true
+            fi
+
+            echo "Starting container..."
+            docker run -d --name static_site -p 80:80 --restart=always ${IMAGE}
+            echo "Done."
+          EOF
